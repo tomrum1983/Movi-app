@@ -482,11 +482,22 @@ function loadMedia(clip) {
   return new Promise(res => {
     if (clip.type === 'video') {
       const v = document.createElement('video');
-      v.src = clip.url; v.muted = true; v.playsInline = true;
-      v.onloadeddata = () => { v.currentTime = clip.trimStart || 0; res(v); };
+      v.src = clip.url;
+      v.muted = true;
+      v.playsInline = true;
+      v.setAttribute('playsinline', '');
+      v.setAttribute('webkit-playsinline', '');
+      v.preload = 'auto';
+      v.onloadeddata = () => {
+        v.currentTime = clip.trimStart || 0;
+        v.playbackRate = clip.speed || 1;
+        res(v);
+      };
+      v.onerror = () => res(v);
       v.load();
     } else {
-      const img = new Image(); img.src = clip.url;
+      const img = new Image();
+      img.src = clip.url;
       img.onload = () => res(img);
     }
   });
@@ -723,26 +734,60 @@ async function startPlay() {
   audioEl.volume = musicVolume;
   if (music) audioEl.play().catch(()=>{});
 
+  // Stop any previously loaded videos
+  playImages.forEach(m => { if (m && m.pause) m.pause(); });
   playImages = await Promise.all(clips.map(c => loadMedia(c)));
+
   let idx = 0, phaseStart = performance.now(), phase = 'show';
   const tot = totalMs();
+
+  // Start playing the first video clip immediately
+  const startClipMedia = (i) => {
+    const m = playImages[i];
+    if (m && m.play) {
+      m.currentTime = clips[i].trimStart || 0;
+      m.playbackRate = clips[i].speed || 1;
+      m.play().catch(()=>{});
+    }
+  };
+  startClipMedia(0);
 
   const tick = (now) => {
     if (!playing) return;
     const clip = clips[idx];
     if (!clip) { stopPlay(); return; }
     const elapsed = now - phaseStart;
+
+    // For video clips, use actual video duration if shorter than set duration
+    const media = playImages[idx];
+    let clipDur = clip.duration;
+    if (media && media.duration && clip.type === 'video') {
+      const videoDur = (media.duration - (clip.trimStart || 0)) * 1000 / (clip.speed || 1);
+      clipDur = Math.min(clip.duration, videoDur > 500 ? videoDur : clip.duration);
+    }
+
     let totalElapsed = clips.slice(0,idx).reduce((s,c)=>s+c.duration+c.transitionDuration,0) + elapsed;
     const prog = Math.min(1, totalElapsed / tot);
     document.getElementById('progress-fill').style.width = (prog*100)+'%';
     currentClipIdx = idx;
     updateTimeline();
     ctx.clearRect(0,0,W,H);
+
     if (phase === 'show') {
-      const kb = clip.zoom ? elapsed/clip.duration : 0;
+      const kb = clip.zoom ? elapsed / clipDur : 0;
       drawMediaToCanvas(playImages[idx], clip.zoom, clip.blur, kb);
       drawTextsOnCanvas(now);
-      if (elapsed >= clip.duration) { phaseStart = now; phase = 'transition'; }
+      if (elapsed >= clipDur) {
+        // Pause current video
+        if (media && media.pause) media.pause();
+        phaseStart = now;
+        phase = 'transition';
+        // Preload next video
+        if (playImages[idx+1] && playImages[idx+1].play) {
+          playImages[idx+1].currentTime = clips[idx+1]?.trimStart || 0;
+          playImages[idx+1].playbackRate = clips[idx+1]?.speed || 1;
+        }
+      }
     } else {
       const p = Math.min(1, elapsed / clip.transitionDuration);
       drawTransitionFrame(playImages[idx], playImages[idx+1], p, clip.transition, clip, clips[idx+1]);
@@ -750,7 +795,9 @@ async function startPlay() {
       if (elapsed >= clip.transitionDuration) {
         idx++;
         if (idx >= clips.length) { stopPlay(); return; }
-        phaseStart = now; phase = 'show';
+        phaseStart = now;
+        phase = 'show';
+        startClipMedia(idx);
       }
     }
     animFrame = requestAnimationFrame(tick);
@@ -762,6 +809,8 @@ function stopPlay() {
   playing = false;
   cancelAnimationFrame(animFrame);
   audioEl.pause(); audioEl.currentTime = 0;
+  // Stop all loaded video elements
+  playImages.forEach(m => { if (m && m.pause) { m.pause(); m.currentTime = 0; } });
   document.getElementById('progress-fill').style.width = '0%';
   updatePlayBtn();
   updateTimeline();
